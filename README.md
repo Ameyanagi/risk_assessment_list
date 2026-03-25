@@ -54,6 +54,15 @@ The build also exports `reference/generated_synonyms.sqlite3`, a sidecar
 database containing synonym groups, identifiers, and aliases for the hazardous
 substances covered by the generated data set.
 
+Internally, the repo is split into two private implementation areas:
+
+- `risk_assessment_list._runtime` for lookup/search/evaluation logic
+- `risk_assessment_list._build` for fetch/build/export orchestration
+
+The checked-in `scripts/*.py` commands are thin wrappers over those internal
+modules, so the user-facing workflow stays the same while the package internals
+remain importable and testable.
+
 ## Usage
 
 ```python

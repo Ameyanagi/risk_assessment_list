@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
+import importlib
 import json
 from email.message import Message
-from pathlib import Path
 from urllib.error import HTTPError, URLError
 
-ROOT = Path(__file__).resolve().parents[1]
-SCRIPT_PATH = ROOT / "scripts" / "fetch_reference.py"
 ManifestEntry = dict[str, str | bool]
 
 
@@ -28,13 +25,7 @@ class FakeResponse:
 
 
 def load_fetch_reference_module():
-    spec = importlib.util.spec_from_file_location(
-        "fetch_reference_under_test", SCRIPT_PATH
-    )
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module("risk_assessment_list._build.fetch")
 
 
 def make_previous_entry(source: dict[str, str], data: bytes) -> ManifestEntry:
