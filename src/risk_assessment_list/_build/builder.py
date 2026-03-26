@@ -8,6 +8,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable
 
@@ -30,6 +31,7 @@ from risk_assessment_list.synonyms import generate_synonyms, normalize_synonym_t
 
 from .config import BUILD_DIR
 from .config import GHS_SOURCE_FILE
+from .config import JOHAS_SOURCE_FILE
 from .config import LEGAL_SOURCE_FILES
 from .config import MANIFEST_PATH
 from .config import OUTPUT_DB
@@ -80,6 +82,80 @@ class GHSRecord:
     hazard_classes: dict[str, str]
     model_label_url: str | None
     model_sds_url: str | None
+
+
+@dataclass(frozen=True)
+class JohasRecord:
+    source_file_id: int
+    row_number: int
+    continuation_row_number: int | None
+    section_title: str
+    section_number: str
+    substance_name: str
+    cas_text: str
+    cas_rns: tuple[str, ...]
+    label_threshold: float | None
+    sds_threshold: float | None
+    remarks: str
+    raw_effective_date: str
+    nite_chrip_url: str | None
+
+
+_SECTION_PREFIX_RE = re.compile(r"^\d+")
+_SECTION_PARENS_RE = re.compile(r"\([^)]*\)")
+
+
+class JohasChemicalListParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self._in_tbody = False
+        self._in_tr = False
+        self._tbody_row_number = 0
+        self._current_row_number = 0
+        self._current_row: list[dict[str, str | None]] = []
+        self._current_cell: dict[str, str | None] | None = None
+        self.rows: list[tuple[int, list[dict[str, str | None]]]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if tag == "tbody" and attributes.get("id") == "chemical_list":
+            self._in_tbody = True
+            return
+        if not self._in_tbody:
+            return
+        if tag == "tr":
+            self._in_tr = True
+            self._tbody_row_number += 1
+            self._current_row_number = self._tbody_row_number
+            self._current_row = []
+            return
+        if self._in_tr and tag in {"td", "th"}:
+            self._current_cell = {"tag": tag, "text": "", "href": None}
+            return
+        if self._current_cell is not None and tag == "a":
+            self._current_cell["href"] = attributes.get("href")
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self._in_tbody:
+            return
+        if self._current_cell is not None and tag == self._current_cell["tag"]:
+            self._current_cell["text"] = " ".join(
+                (self._current_cell["text"] or "").split()
+            )
+            self._current_row.append(self._current_cell)
+            self._current_cell = None
+            return
+        if self._in_tr and tag == "tr":
+            self.rows.append((self._current_row_number, self._current_row))
+            self._in_tr = False
+            self._current_row = []
+            return
+        if tag == "tbody":
+            self._in_tbody = False
+
+    def handle_data(self, data: str) -> None:
+        if self._current_cell is not None:
+            self._current_cell["text"] = f"{self._current_cell['text']}{data}"
 
 
 class Canonicalizer:
@@ -393,6 +469,7 @@ def main() -> None:
         TEMP_DB.unlink()
 
     connection = sqlite3.connect(TEMP_DB)
+    connection.row_factory = sqlite3.Row
     connection.execute("pragma foreign_keys = on")
     connection.execute("pragma temp_store = memory")
     connection.execute(f"pragma user_version = {SCHEMA_VERSION}")
@@ -400,8 +477,15 @@ def main() -> None:
     try:
         fts_enabled = create_schema(connection)
         source_file_ids = load_sources(connection, manifest["sources"])
+        raw_johas_row_count = 0
         raw_legal_row_count = 0
         raw_ghs_row_count = 0
+        raw_johas_rows, johas_records = stage_johas_html(
+            connection,
+            source_file_id=source_file_ids[JOHAS_SOURCE_FILE],
+            path=REFERENCE_DIR / JOHAS_SOURCE_FILE,
+        )
+        raw_johas_row_count += raw_johas_rows
         legal_records: list[LegalRecord] = []
 
         for filename in LEGAL_SOURCE_FILES:
@@ -424,6 +508,7 @@ def main() -> None:
         canonicalizer = Canonicalizer(connection, fts_enabled=fts_enabled)
 
         normalize_legal_records(connection, canonicalizer, legal_records)
+        attach_johas_chrip_urls(connection, johas_records)
         normalize_ghs_records(connection, canonicalizer, ghs_records, hazard_class_ids)
         load_reviewed_synonyms(canonicalizer, REVIEWED_SYNONYM_CSV)
 
@@ -438,6 +523,7 @@ def main() -> None:
             connection,
             manifest_sha=manifest_sha,
             source_file_count=len(manifest["sources"]),
+            raw_johas_row_count=raw_johas_row_count,
             raw_legal_row_count=raw_legal_row_count,
             raw_ghs_row_count=raw_ghs_row_count,
             fts_enabled=fts_enabled,
@@ -480,6 +566,7 @@ def create_schema(connection: sqlite3.Connection) -> bool:
             built_at text not null,
             source_manifest_sha256 text not null,
             source_file_count integer not null,
+            raw_johas_row_count integer not null,
             raw_legal_row_count integer not null,
             raw_ghs_row_count integer not null,
             legal_obligation_count integer not null,
@@ -492,6 +579,15 @@ def create_schema(connection: sqlite3.Connection) -> bool:
             id integer primary key,
             source_file_id integer not null references source_files(id),
             source_sheet text not null,
+            row_number integer not null,
+            row_kind text not null,
+            cells_json text not null,
+            parsed_ok integer not null
+        );
+
+        create table raw_johas_rows (
+            id integer primary key,
+            source_file_id integer not null references source_files(id),
             row_number integer not null,
             row_kind text not null,
             cells_json text not null,
@@ -559,6 +655,12 @@ def create_schema(connection: sqlite3.Connection) -> bool:
             remarks text,
             source_list_effective_date text,
             raw_effective_date text
+        );
+
+        create table legal_obligation_chrip_urls (
+            legal_obligation_id integer not null references legal_obligations(id) on delete cascade,
+            nite_chrip_url text not null,
+            primary key (legal_obligation_id, nite_chrip_url)
         );
 
         create table legal_obligation_cas (
@@ -696,6 +798,8 @@ def stage_legal_workbook(
         sheet_effective_date = infer_sheet_effective_date(sheet.title)
         current_section = ""
         current_headers: dict[str, int] | None = None
+        current_section_number = ""
+        current_list_index = ""
 
         for row_index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
             values = [normalize_cell(value) for value in row]
@@ -710,12 +814,34 @@ def stage_legal_workbook(
                 row_kind = "section"
                 current_section = first_non_empty(values)
                 current_headers = None
+                current_section_number = ""
+                current_list_index = ""
             elif header_map:
                 row_kind = "header"
                 current_headers = header_map
+                current_section_number = ""
+                current_list_index = ""
             elif current_headers and is_legal_data_row(values, current_headers):
                 row_kind = "data"
                 parsed_ok = 1
+                section_number = (
+                    values[current_headers.get("section_number", -1)]
+                    if "section_number" in current_headers
+                    else ""
+                )
+                if section_number:
+                    current_section_number = section_number
+                else:
+                    section_number = current_section_number
+                list_index = (
+                    values[current_headers.get("list_index", -1)]
+                    if "list_index" in current_headers
+                    else ""
+                )
+                if list_index:
+                    current_list_index = list_index
+                else:
+                    list_index = current_list_index
                 records.append(
                     LegalRecord(
                         source_file_id=source_file_id,
@@ -728,12 +854,8 @@ def stage_legal_workbook(
                         cas_text=values[current_headers["cas"]],
                         cas_rns=tuple(extract_cas_rns(values[current_headers["cas"]])),
                         section_title=current_section,
-                        section_number=values[current_headers.get("section_number", -1)]
-                        if "section_number" in current_headers
-                        else "",
-                        list_index=values[current_headers.get("list_index", -1)]
-                        if "list_index" in current_headers
-                        else "",
+                        section_number=section_number,
+                        list_index=list_index,
                         label_threshold=parse_float(
                             values[current_headers["label_threshold"]]
                         ),
@@ -773,6 +895,73 @@ def stage_legal_workbook(
                 ),
             )
             raw_row_count += 1
+
+    return raw_row_count, records
+
+
+def stage_johas_html(
+    connection: sqlite3.Connection,
+    *,
+    source_file_id: int,
+    path: Path,
+) -> tuple[int, list[JohasRecord]]:
+    parser = JohasChemicalListParser()
+    parser.feed(path.read_text(encoding="utf-8", errors="ignore"))
+
+    raw_row_count = 0
+    records: list[JohasRecord] = []
+    rows = parser.rows
+    for row_index in range(0, len(rows), 2):
+        top_row_number, top_cells = rows[row_index]
+        bottom_row_number = rows[row_index + 1][0] if row_index + 1 < len(rows) else None
+        bottom_cells = rows[row_index + 1][1] if row_index + 1 < len(rows) else []
+        parsed_ok = int(len(top_cells) >= 8 and len(bottom_cells) >= 1)
+        connection.execute(
+            """
+            insert into raw_johas_rows (
+                source_file_id,
+                row_number,
+                row_kind,
+                cells_json,
+                parsed_ok
+            ) values (?, ?, ?, ?, ?)
+            """,
+            (
+                source_file_id,
+                top_row_number,
+                "data",
+                json.dumps(
+                    {
+                        "top_row_number": top_row_number,
+                        "bottom_row_number": bottom_row_number,
+                        "top_cells": top_cells,
+                        "bottom_cells": bottom_cells,
+                    },
+                    ensure_ascii=False,
+                ),
+                parsed_ok,
+            ),
+        )
+        raw_row_count += 1
+        if not parsed_ok:
+            continue
+        records.append(
+            JohasRecord(
+                source_file_id=source_file_id,
+                row_number=top_row_number,
+                continuation_row_number=bottom_row_number,
+                section_title=str(top_cells[0]["text"] or ""),
+                section_number=str(bottom_cells[0]["text"] or ""),
+                substance_name=str(top_cells[2]["text"] or ""),
+                cas_text=str(top_cells[3]["text"] or ""),
+                cas_rns=tuple(extract_cas_rns(str(top_cells[3]["text"] or ""))),
+                label_threshold=parse_float(str(top_cells[4]["text"] or "")),
+                sds_threshold=parse_float(str(top_cells[5]["text"] or "")),
+                remarks=str(top_cells[6]["text"] or ""),
+                raw_effective_date=str(top_cells[1]["text"] or ""),
+                nite_chrip_url=clean_url(str(top_cells[7].get("href") or "")),
+            )
+        )
 
     return raw_row_count, records
 
@@ -914,6 +1103,89 @@ def normalize_legal_records(
             )
 
 
+def attach_johas_chrip_urls(
+    connection: sqlite3.Connection,
+    records: list[JohasRecord],
+) -> None:
+    legal_rows = [
+        dict(row)
+        for row in connection.execute(
+            """
+            select
+                id,
+                substance_name,
+                cas_text,
+                section_title,
+                section_number,
+                label_threshold,
+                sds_threshold
+            from legal_obligations
+            """
+        ).fetchall()
+    ]
+    exact_lookup: dict[
+        tuple[str, str, str, str, float | None, float | None], list[dict[str, object]]
+    ] = {}
+    base_lookup: dict[
+        tuple[str, str, str, float | None, float | None], list[dict[str, object]]
+    ] = {}
+    for row in legal_rows:
+        row["cas_rns"] = tuple(extract_cas_rns(str(row["cas_text"] or "")))
+        base_key = (
+            normalize_text(str(row["substance_name"] or "")),
+            _normalized_section_reference(str(row["section_title"] or "")),
+            normalize_text(str(row["section_number"] or "")),
+            row["label_threshold"],
+            row["sds_threshold"],
+        )
+        exact_key = base_key[:3] + (
+            _cas_match_key(str(row["cas_text"] or "")),
+            base_key[3],
+            base_key[4],
+        )
+        exact_lookup.setdefault(exact_key, []).append(row)
+        base_lookup.setdefault(base_key, []).append(row)
+
+    matched_urls: dict[int, set[str]] = {}
+    for record in records:
+        if not record.nite_chrip_url:
+            continue
+        base_key = (
+            normalize_text(record.substance_name),
+            _normalized_section_reference(record.section_title),
+            normalize_text(record.section_number),
+            record.label_threshold,
+            record.sds_threshold,
+        )
+        exact_key = base_key[:3] + (
+            _cas_match_key(record.cas_text),
+            base_key[3],
+            base_key[4],
+        )
+        matches = exact_lookup.get(exact_key, [])
+        if not matches and record.cas_rns:
+            matches = [
+                row
+                for row in base_lookup.get(base_key, [])
+                if row["cas_rns"]
+                and set(record.cas_rns).issubset(set(row["cas_rns"]))
+            ]
+        for row in matches:
+            matched_urls.setdefault(int(row["id"]), set()).add(record.nite_chrip_url)
+
+    for legal_obligation_id, urls in matched_urls.items():
+        for url in sorted(urls):
+            connection.execute(
+                """
+                insert into legal_obligation_chrip_urls (
+                    legal_obligation_id,
+                    nite_chrip_url
+                ) values (?, ?)
+                """,
+                (legal_obligation_id, url),
+            )
+
+
 def normalize_ghs_records(
     connection: sqlite3.Connection,
     canonicalizer: Canonicalizer,
@@ -1045,6 +1317,29 @@ def seed_ghs_hazard_classes(connection: sqlite3.Connection) -> dict[str, int]:
     return mapping
 
 
+def _normalized_section_reference(value: str) -> str:
+    normalized = normalize_text(value)
+    normalized = _SECTION_PREFIX_RE.sub("", normalized)
+    normalized = _SECTION_PARENS_RE.sub("", normalized)
+    normalized = normalized.replace("労働安全衛生法施行令", "労働安全衛生施行令")
+    normalized = normalized.replace("労働安全衛生法規則", "労働安全衛生規則")
+    return normalized
+
+
+def _cas_match_key(value: str) -> str:
+    cas_rns = tuple(extract_cas_rns(value))
+    if cas_rns:
+        return "|".join(cas_rns)
+    normalized = normalize_text(value)
+    if not normalized:
+        return ""
+    if "特定されていない" in value or "＊" in value or "*2" in normalized:
+        return "unspecified"
+    if "下記" in value and "とおり" in value:
+        return "see_below"
+    return normalized
+
+
 def validate_snapshot(
     connection: sqlite3.Connection,
     *,
@@ -1053,6 +1348,11 @@ def validate_snapshot(
     expected_ghs_classes_per_entry: int,
 ) -> None:
     source_count = scalar(connection, "select count(*) from source_files")
+    raw_johas_row_total = scalar(connection, "select count(*) from raw_johas_rows")
+    raw_johas_data_count = scalar(
+        connection,
+        "select count(*) from raw_johas_rows where row_kind = 'data' and parsed_ok = 1",
+    )
     raw_legal_row_total = scalar(connection, "select count(*) from raw_legal_rows")
     raw_legal_data_count = scalar(
         connection,
@@ -1065,6 +1365,9 @@ def validate_snapshot(
     )
     legal_count = scalar(connection, "select count(*) from legal_obligations")
     legal_cas_count = scalar(connection, "select count(*) from legal_obligation_cas")
+    legal_chrip_url_count = scalar(
+        connection, "select count(*) from legal_obligation_chrip_urls"
+    )
     ghs_count = scalar(connection, "select count(*) from ghs_entries")
     ghs_cas_count = scalar(connection, "select count(*) from ghs_entry_cas")
     hazard_class_count = scalar(connection, "select count(*) from ghs_hazard_classes")
@@ -1084,6 +1387,8 @@ def validate_snapshot(
         raise RuntimeError(
             f"expected {expected_source_count} source files, found {source_count}"
         )
+    if raw_johas_data_count == 0:
+        raise RuntimeError("JOHAS rows were not staged")
     if raw_legal_data_count != legal_count:
         raise RuntimeError(
             "raw legal data rows and normalized legal obligations diverged"
@@ -1100,12 +1405,16 @@ def validate_snapshot(
         raise RuntimeError(
             "GHS hazard-class dimension size does not match the expected schema"
         )
+    if legal_chrip_url_count == 0:
+        raise RuntimeError("no NITE-CHRIP URLs were attached to legal obligations")
 
     baseline = SNAPSHOT_BASELINES.get(source_snapshot_sha)
     if baseline is None:
         return
 
     actual_counts = {
+        "raw_johas_rows_total": raw_johas_row_total,
+        "raw_johas_rows_data": raw_johas_data_count,
         "raw_legal_rows_total": raw_legal_row_total,
         "raw_legal_rows_data": raw_legal_data_count,
         "raw_ghs_rows_total": raw_ghs_row_total,
@@ -1129,6 +1438,7 @@ def write_build_meta(
     *,
     manifest_sha: str,
     source_file_count: int,
+    raw_johas_row_count: int,
     raw_legal_row_count: int,
     raw_ghs_row_count: int,
     fts_enabled: bool,
@@ -1141,13 +1451,14 @@ def write_build_meta(
             built_at,
             source_manifest_sha256,
             source_file_count,
+            raw_johas_row_count,
             raw_legal_row_count,
             raw_ghs_row_count,
             legal_obligation_count,
             ghs_entry_count,
             substance_count,
             fts_enabled
-        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             1,
@@ -1155,6 +1466,7 @@ def write_build_meta(
             datetime.now(timezone.utc).isoformat(),
             manifest_sha,
             source_file_count,
+            raw_johas_row_count,
             raw_legal_row_count,
             raw_ghs_row_count,
             scalar(connection, "select count(*) from legal_obligations"),

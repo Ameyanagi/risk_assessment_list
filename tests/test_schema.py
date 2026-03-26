@@ -24,12 +24,14 @@ def test_packaged_database_uses_normalized_schema() -> None:
         }
 
         assert "build_meta" in tables
+        assert "raw_johas_rows" in tables
         assert "raw_legal_rows" in tables
         assert "raw_ghs_rows" in tables
         assert "substances" in tables
         assert "substance_identifiers" in tables
         assert "substance_aliases" in tables
         assert "legal_obligations" in tables
+        assert "legal_obligation_chrip_urls" in tables
         assert "ghs_classifications" in tables
         assert "ghs_hazard_classes" in tables
         assert "substance_alias_fts" in tables
@@ -37,9 +39,18 @@ def test_packaged_database_uses_normalized_schema() -> None:
         schema_version = cursor.execute(
             "SELECT schema_version FROM build_meta"
         ).fetchone()[0]
-        assert schema_version >= 2
+        assert schema_version >= 3
         user_version = cursor.execute("PRAGMA user_version").fetchone()[0]
         assert user_version == schema_version
+
+        raw_johas_row_count = cursor.execute(
+            "SELECT COUNT(*) FROM raw_johas_rows"
+        ).fetchone()[0]
+        chrip_url_count = cursor.execute(
+            "SELECT COUNT(*) FROM legal_obligation_chrip_urls"
+        ).fetchone()[0]
+        assert raw_johas_row_count > 0
+        assert chrip_url_count > 0
 
         hazard_class_count = cursor.execute(
             "SELECT COUNT(*) FROM ghs_hazard_classes"

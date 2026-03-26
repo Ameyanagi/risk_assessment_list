@@ -279,6 +279,12 @@ class RuntimeStore:
             value_column="cas_rn",
             parent_ids=[int(row["id"]) for row in rows],
         )
+        chrip_url_map = self.child_values(
+            table="legal_obligation_chrip_urls",
+            id_column="legal_obligation_id",
+            value_column="nite_chrip_url",
+            parent_ids=[int(row["id"]) for row in rows],
+        )
         return [
             LegalMatch(
                 substance_name=row["substance_name"],
@@ -296,6 +302,11 @@ class RuntimeStore:
                 source_row=row["source_row"],
                 source_list_effective_date=row["source_list_effective_date"] or None,
                 raw_effective_date=row["raw_effective_date"] or None,
+                nite_chrip_urls=chrip_url_map.get(int(row["id"]), tuple()),
+                nite_chrip_url=next(
+                    iter(chrip_url_map.get(int(row["id"]), tuple())),
+                    None,
+                ),
             )
             for row in rows
         ]

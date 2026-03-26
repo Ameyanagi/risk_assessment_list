@@ -18,10 +18,11 @@ SYNONYM_DB_OUTPUT = REFERENCE_DIR / "generated_synonyms.sqlite3"
 REVIEWED_SYNONYM_CSV = REFERENCE_DIR / "reviewed_synonyms.csv"
 TEMP_DB = BUILD_DIR / "ra.sqlite3.tmp"
 USER_AGENT = "risk-assessment-list/0.1.0"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 LEGAL_SOURCE_FILES = ["001168179.xlsx", "001474394.xlsx"]
 GHS_SOURCE_FILE = "list_nite_all.xlsx"
+JOHAS_SOURCE_FILE = "johas_step_list.html"
 SOURCES: tuple[dict[str, str], ...] = (
     {
         "key": "johas_step_list",
@@ -46,6 +47,8 @@ SOURCES: tuple[dict[str, str], ...] = (
 )
 SNAPSHOT_BASELINES = {
     "8ddba2f69b917a4c5386d37cc062bec2a6792e9f4f8faef3c3a08dd749b9d3ca": {
+        "raw_johas_rows_total": 2469,
+        "raw_johas_rows_data": 2469,
         "raw_legal_rows_total": 4953,
         "raw_legal_rows_data": 4889,
         "raw_ghs_rows_total": 3418,

@@ -18,6 +18,24 @@ risk-assessment obligation lists and for surfacing GHS-based hazard notices.
 - `https://www.mhlw.go.jp/content/11300000/001474394.xlsx`
 - `https://www.chem-info.nite.go.jp/chem/ghs/files/list_nite_all.xlsx`
 
+## Install With uv
+
+If you want to use the library directly from GitHub in another project:
+
+```bash
+uv add git+https://github.com/Ameyanagi/risk_assessment_list.git
+```
+
+Then import it normally:
+
+```python
+from risk_assessment_list import evaluate_substance
+
+result = evaluate_substance("50-00-0")
+print(result.legal_ra_required)
+print(result.nite_chrip_url)
+```
+
 ## Setup
 
 ```bash
@@ -78,6 +96,9 @@ result = evaluate_substance("50-00-0")
 print(result.legal_ra_required)
 print(result.ghs_notice_required)
 print(result.ghs_pictograms)
+print(result.nite_chrip_url)
+print(result.nite_chrip_urls)
+print(result.model_sds_url)
 
 mixture = evaluate_mixture(
     [
@@ -93,6 +114,14 @@ print(mixture.legal_ra_required)
 - `legal_ra_required` follows the published union of the downloaded MHLW lists.
 - `ghs_notice_required` is broader and fires whenever matched NITE data contains
   an assigned GHS classification, including environmental classes.
+- `nite_chrip_url` is the first matched JOHAS `NITE-CHRIP` detail link returned
+  with the legal/regulatory matches.
+- `nite_chrip_urls` contains all matched CHRIP detail links for the result. Some
+  regulatory rows map to multiple CHRIP pages because JOHAS splits one legal row
+  into multiple CAS-specific detail pages.
+- `model_label_url` and `model_sds_url` come from the NITE GHS workbook and
+  point to the MHLW `anzeninfo` model label/SDS pages. They are separate from
+  the JOHAS `NITE-CHRIP` link.
 - `search_substances(..., mode="balanced")` is the default. It prefers exact
   aliases and strong prefix matches, and returns `[]` for obvious garbage input.
 - `search_substances(..., mode="fuzzy")` is the broad finder mode. It keeps

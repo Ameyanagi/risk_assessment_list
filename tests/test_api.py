@@ -12,6 +12,8 @@ def test_exact_cas_lookup_returns_legal_and_ghs_matches() -> None:
     assert result.ghs_notice_required is True
     assert "health_hazard" in result.ghs_pictograms
     assert result.model_label_url is not None
+    assert result.model_sds_url is not None
+    assert "anzeninfo.mhlw.go.jp/anzen/gmsds/" in result.model_sds_url
 
 
 def test_ghs_only_lookup_returns_notice_without_legal_obligation() -> None:
@@ -113,6 +115,27 @@ def test_mixture_uses_label_or_sds_threshold() -> None:
     assert result.triggering_components
 
 
+def test_legal_lookup_returns_nite_chrip_link_with_regulatory_matches() -> None:
+    library = RiskAssessmentList()
+    result = library.evaluate_substance("119-93-7")
+
+    assert result.legal_ra_required is True
+    assert result.nite_chrip_url is not None
+    assert result.nite_chrip_url.startswith(
+        "https://www.chem-info.nite.go.jp/chem/chrip/chrip_search/"
+    )
+    assert any(match.nite_chrip_urls for match in result.legal_matches)
+
+
+def test_aggregated_legal_match_can_return_multiple_nite_chrip_links() -> None:
+    library = RiskAssessmentList()
+    result = library.evaluate_substance("51276-47-2")
+
+    assert result.legal_ra_required is True
+    assert len(result.nite_chrip_urls) >= 2
+    assert any(len(match.nite_chrip_urls) >= 2 for match in result.legal_matches)
+
+
 def test_unknown_identifier_returns_no_match() -> None:
     library = RiskAssessmentList()
     result = library.evaluate_substance("not-a-real-substance")
@@ -120,3 +143,4 @@ def test_unknown_identifier_returns_no_match() -> None:
     assert result.exact_match is False
     assert result.legal_ra_required is False
     assert result.ghs_notice_required is False
+    assert result.nite_chrip_url is None

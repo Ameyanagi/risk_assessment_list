@@ -19,6 +19,12 @@ def evaluate_substance(store: RuntimeStore, identifier: str) -> SubstanceResult:
     legal_ra_required = bool(legal_matches)
     ghs_notice_required = bool(ghs_matches)
     pictograms = tuple(sorted({p for match in ghs_matches for p in match.pictograms}))
+    nite_chrip_urls = _distinct_urls(
+        url
+        for match in legal_matches
+        for url in match.nite_chrip_urls
+    )
+    nite_chrip_url = next(iter(nite_chrip_urls), None)
     model_label_url = next(
         (match.model_label_url for match in ghs_matches if match.model_label_url), None
     )
@@ -39,6 +45,8 @@ def evaluate_substance(store: RuntimeStore, identifier: str) -> SubstanceResult:
         legal_matches=tuple(legal_matches),
         ghs_matches=tuple(ghs_matches),
         ghs_pictograms=pictograms,
+        nite_chrip_urls=nite_chrip_urls,
+        nite_chrip_url=nite_chrip_url,
         model_label_url=model_label_url,
         model_sds_url=model_sds_url,
     )
@@ -128,3 +136,14 @@ def _summarize_status(
         "no_match",
         "No published MHLW obligation match or assigned NITE GHS classification was found for the identifier.",
     )
+
+
+def _distinct_urls(urls: Iterable[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered_urls = []
+    for url in urls:
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        ordered_urls.append(url)
+    return tuple(ordered_urls)

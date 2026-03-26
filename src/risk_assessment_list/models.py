@@ -33,6 +33,8 @@ class LegalMatch:
     source_row: int
     source_list_effective_date: Optional[str]
     raw_effective_date: Optional[str]
+    nite_chrip_urls: tuple[str, ...] = field(default_factory=tuple)
+    nite_chrip_url: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,8 @@ class SubstanceResult:
     legal_matches: tuple[LegalMatch, ...] = field(default_factory=tuple)
     ghs_matches: tuple[GHSMatch, ...] = field(default_factory=tuple)
     ghs_pictograms: tuple[str, ...] = field(default_factory=tuple)
+    nite_chrip_urls: tuple[str, ...] = field(default_factory=tuple)
+    nite_chrip_url: Optional[str] = None
     model_label_url: Optional[str] = None
     model_sds_url: Optional[str] = None
 
