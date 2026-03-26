@@ -103,6 +103,30 @@ def test_fuzzy_mode_handles_typo_queries() -> None:
     assert formaldehyd[0].display_name == "ホルムアルデヒド"
 
 
+def test_fuzzy_family_query_surfaces_platinum_family_candidate() -> None:
+    library = RiskAssessmentList()
+    candidates = library.search_substances("白金及びその化合物", limit=5, mode="fuzzy")
+
+    assert candidates
+    assert candidates[0].display_name == "白金及びその水溶性塩"
+
+
+def test_existing_family_exact_query_still_returns_rhodium_first() -> None:
+    library = RiskAssessmentList()
+    candidates = library.search_substances("ロジウム及びその化合物", limit=5, mode="fuzzy")
+
+    assert candidates
+    assert candidates[0].display_name == "ロジウム及びその化合物"
+
+
+def test_evaluate_substance_keeps_exact_match_semantics_for_missing_family_record() -> None:
+    library = RiskAssessmentList()
+    result = library.evaluate_substance("白金及びその化合物")
+
+    assert result.exact_match is False
+    assert result.legal_ra_required is False
+
+
 def test_mixture_uses_label_or_sds_threshold() -> None:
     library = RiskAssessmentList()
     result = library.evaluate_mixture(

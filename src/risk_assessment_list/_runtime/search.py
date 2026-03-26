@@ -9,6 +9,26 @@ from ..normalize import normalize_cas, normalize_text
 from ..synonyms import normalize_synonym_text
 from .store import RuntimeStore
 
+_JP_FAMILY_SUFFIXES = tuple(
+    normalize_synonym_text(value)
+    for value in (
+        "及びその化合物",
+        "およびその化合物",
+        "及びその水溶性塩",
+        "およびその水溶性塩",
+    )
+)
+_EN_FAMILY_SUFFIXES = tuple(
+    normalize_synonym_text(value)
+    for value in (
+        "and its compounds",
+        "and its compound",
+        "and its water-soluble salts",
+        "and its water soluble salts",
+    )
+)
+_FAMILY_SUFFIXES = _JP_FAMILY_SUFFIXES + _EN_FAMILY_SUFFIXES
+
 
 def search_substances(
     store: RuntimeStore,
@@ -20,6 +40,7 @@ def search_substances(
     normalized_query = normalize_synonym_text(query)
     normalized_name = normalize_text(query)
     normalized_cas = normalize_cas(query)
+    family_stem_query = _family_query_stem(normalized_query) if mode == "fuzzy" else None
     if not normalized_query and not normalized_cas:
         return []
     catalog = store.substance_catalog()
@@ -35,6 +56,7 @@ def search_substances(
             catalog=catalog,
             normalized_query=normalized_query,
             normalized_cas=normalized_cas,
+            family_stem_query=family_stem_query,
             mode=mode,
             min_score=0.0,
         )[:limit]
@@ -45,6 +67,13 @@ def search_substances(
             normalized_cas=normalized_cas,
         )
     )
+    if family_stem_query:
+        candidate_ids.update(
+            store.candidate_substance_ids(
+                normalized_query=family_stem_query,
+                normalized_cas="",
+            )
+        )
     candidate_ids.update(exact_ids)
 
     if not candidate_ids and mode == "balanced":
@@ -53,6 +82,7 @@ def search_substances(
             catalog=catalog,
             normalized_query=normalized_query,
             normalized_cas=normalized_cas,
+            family_stem_query=family_stem_query,
             mode=mode,
             min_score=90.0,
             fallback_only=True,
@@ -67,6 +97,7 @@ def search_substances(
         catalog=catalog,
         normalized_query=normalized_query,
         normalized_cas=normalized_cas,
+        family_stem_query=family_stem_query,
         mode=mode,
         min_score=min_score,
     )[:limit]
@@ -78,6 +109,7 @@ def _rank_candidates(
     catalog: dict[int, dict],
     normalized_query: str,
     normalized_cas: str,
+    family_stem_query: str | None,
     mode: str,
     min_score: float,
     fallback_only: bool = False,
@@ -96,6 +128,7 @@ def _rank_candidates(
             substance=substance,
             normalized_query=normalized_query,
             normalized_cas=normalized_cas,
+            family_stem_query=family_stem_query,
             mode=mode,
             fallback_only=fallback_only,
         )
@@ -215,6 +248,7 @@ def _score_substance(
     substance: dict,
     normalized_query: str,
     normalized_cas: str,
+    family_stem_query: str | None,
     mode: str,
     fallback_only: bool,
 ) -> tuple[int, int, float] | None:
@@ -235,6 +269,7 @@ def _score_substance(
         match = _score_alias(
             normalized_query=normalized_query,
             alias_normalized=alias_normalized,
+            family_stem_query=family_stem_query,
             alias_type=alias_type,
             confidence=confidence,
             exact_match_allowed=exact_match_allowed,
@@ -251,6 +286,7 @@ def _score_alias(
     *,
     normalized_query: str,
     alias_normalized: str,
+    family_stem_query: str | None,
     alias_type: str,
     confidence: str,
     exact_match_allowed: bool,
@@ -274,6 +310,16 @@ def _score_alias(
     if len(normalized_query) >= 2 and alias_normalized.startswith(normalized_query):
         prefix_penalty = min(max(len(alias_normalized) - len(normalized_query), 0), 12)
         score = max(86.0, 96.0 - (prefix_penalty * 1.25))
+        return (2, ranking_signal, score)
+
+    if (
+        family_stem_query
+        and len(family_stem_query) >= 2
+        and alias_normalized.startswith(family_stem_query)
+        and _is_family_alias(alias_normalized)
+    ):
+        family_penalty = min(max(len(alias_normalized) - len(family_stem_query), 0), 18)
+        score = max(88.0, 95.0 - (family_penalty * 0.75))
         return (2, ranking_signal, score)
 
     score = float(fuzz.WRatio(normalized_query, alias_normalized))
@@ -304,3 +350,18 @@ def _length_similarity(left: str, right: str) -> float:
 
 def _match_sort_key(match: tuple[int, int, float]) -> tuple[int, int, float]:
     return (match[0], match[1], -match[2])
+
+
+def _family_query_stem(normalized_query: str) -> str | None:
+    if not normalized_query:
+        return None
+    for suffix in _FAMILY_SUFFIXES:
+        if normalized_query.endswith(suffix):
+            stem = normalized_query[: -len(suffix)].strip()
+            if stem:
+                return stem
+    return None
+
+
+def _is_family_alias(alias_normalized: str) -> bool:
+    return any(alias_normalized.endswith(suffix) for suffix in _FAMILY_SUFFIXES)
